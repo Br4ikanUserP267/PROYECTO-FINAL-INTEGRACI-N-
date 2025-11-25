@@ -13,8 +13,42 @@ JWT_SECRET = os.getenv("JWT_SECRET", "supersecretkey")
 SEDES_URLS = os.getenv("SEDES_URLS", "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000").split(",")
 
 from fastapi import APIRouter
+from fastapi.openapi.utils import get_openapi
 
-app = FastAPI(title="API Gateway HCE Distribuido", description="Sistema distribuido para Cartagena, Sincelejo y Montería")
+app = FastAPI(
+    title="API Gateway HCE Distribuido",
+    description="Sistema distribuido para Cartagena, Sincelejo y Montería. Todas las rutas requieren autenticación JWT en el header Authorization (Bearer <token>).",
+    version="1.0.0",
+    docs_url="/docs",
+    redoc_url="/redoc",
+    openapi_url="/openapi.json"
+)
+# --- Healthcheck ---
+# --- Custom OpenAPI para JWT ---
+def custom_openapi():
+    if app.openapi_schema:
+        return app.openapi_schema
+    openapi_schema = get_openapi(
+        title=app.title,
+        version=app.version,
+        description=app.description,
+        routes=app.routes,
+    )
+    # Añadir esquema de seguridad JWT
+    openapi_schema["components"]["securitySchemes"] = {
+        "BearerAuth": {
+            "type": "http",
+            "scheme": "bearer",
+            "bearerFormat": "JWT"
+        }
+    }
+    for path in openapi_schema["paths"].values():
+        for method in path.values():
+            method["security"] = [{"BearerAuth": []}]
+    app.openapi_schema = openapi_schema
+    return app.openapi_schema
+
+app.openapi = custom_openapi
 
 # Routers por sede
 router_cartagena = APIRouter(prefix="/cartagena", tags=["Cartagena"])
@@ -130,31 +164,16 @@ def add_routes(router, sede):
 
     @router.get("/api/historia-clinica/{id_paciente}", response_model=List[HistoriaClinicaResponse])
     async def federated_historia_clinica(id_paciente: str, user=Depends(get_current_user)):
-        # Consulta federada: PostgREST (Citus) y HAPI FHIR
-        historia_postgrest = await postgrest_get(f"historia_clinica?id_paciente=eq.{id_paciente}")
-        # Consulta a HAPI FHIR por Encounter del paciente
-        fhir_encounters = await hapi_fhir_get("Encounter", params={"subject": f"Patient/{id_paciente}"})
-        # Mapeo y consolidación (simplificado)
+        # Consulta federada a todas las sedes
+        import asyncio
+        import httpx
         results = []
-        for h in historia_postgrest:
-            results.append(h)
-        if "entry" in fhir_encounters:
-            for entry in fhir_encounters["entry"]:
-                resource = entry["resource"]
-                mapped = {
-                    "id_historia_clinica": resource.get("id", ""),
-                    "id_paciente": id_paciente,
-                    "id_doctor": resource.get("participant", [{}])[0].get("individual", {}).get("reference", "").replace("Practitioner/", ""),
-                    "fecha": resource.get("period", {}).get("start", ""),
-                    "edad": next((ext["valueInteger"] for ext in resource.get("extension", []) if ext["url"] == "edad"), None),
-                    "motivo": next((rc["text"] for rc in resource.get("reasonCode", []) if "text" in rc), ""),
-                    "estado_nutricion": next((ext["valueString"] for ext in resource.get("extension", []) if ext["url"] == "estado_nutricion"), ""),
-                    "antecedentes_patologicos": next((ext["valueString"] for ext in resource.get("extension", []) if ext["url"] == "antecedentes_patologicos"), ""),
-                    "sintomas_presentes": next((ext["valueString"] for ext in resource.get("extension", []) if ext["url"] == "sintomas_presentes"), ""),
-                    "signos_presenciales": next((ext["valueString"] for ext in resource.get("extension", []) if ext["url"] == "signos_presenciales"), ""),
-                    "tratamiento": next((ext["valueString"] for ext in resource.get("extension", []) if ext["url"] == "tratamiento"), "")
-                }
-                results.append(mapped)
+        async with httpx.AsyncClient() as client:
+            tasks = [client.get(f"{url}/api/historia-clinica/{id_paciente}") for url in SEDES_URLS]
+            responses = await asyncio.gather(*tasks)
+            for resp in responses:
+                if resp.status_code == 200:
+                    results.extend(resp.json())
         return results
 
     @router.post("/api/historia-clinica", response_model=HistoriaClinicaResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
