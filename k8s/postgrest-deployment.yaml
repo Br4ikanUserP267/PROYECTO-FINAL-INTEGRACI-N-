@@ -1,0 +1,40 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgrest-cartagena
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgrest-cartagena
+  template:
+    metadata:
+      labels:
+        app: postgrest-cartagena
+    spec:
+      containers:
+      - name: postgrest
+        image: postgrest/postgrest:v10.1.1
+        env:
+        - name: PGRST_DB_URI
+          value: "postgres://admin:adminpass@postgres-citus-cartagena:5432/hce_cartagena"
+        - name: PGRST_DB_ANON_ROLE
+          value: "web_anon"
+        - name: PGRST_DB_SCHEMA
+          value: "public"
+        - name: PGRST_SERVER_PORT
+          value: "3000"
+        ports:
+        - containerPort: 3000
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgrest-cartagena
+spec:
+  type: ClusterIP
+  ports:
+    - port: 3000
+      targetPort: 3000
+  selector:
+    app: postgrest-cartagena

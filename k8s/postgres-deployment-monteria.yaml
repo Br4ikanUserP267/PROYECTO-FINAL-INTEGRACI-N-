@@ -1,0 +1,45 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: postgres-citus-monteria
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres-citus-monteria
+  template:
+    metadata:
+      labels:
+        app: postgres-citus-monteria
+    spec:
+      containers:
+      - name: postgres
+        image: citusdata/citus:11.2
+        env:
+        - name: POSTGRES_USER
+          value: "admin"
+        - name: POSTGRES_PASSWORD
+          value: "adminpass"
+        - name: POSTGRES_DB
+          value: "hce_monteria"
+        ports:
+        - containerPort: 5435 # Montería
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+      volumes:
+      - name: postgres-data
+        persistentVolumeClaim:
+          claimName: postgres-pvc-monteria
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: postgres-citus-monteria
+spec:
+  type: ClusterIP
+  ports:
+    - port: 5435
+      targetPort: 5435
+  selector:
+    app: postgres-citus-monteria

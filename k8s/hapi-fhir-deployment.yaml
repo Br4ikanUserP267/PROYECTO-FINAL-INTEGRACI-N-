@@ -1,0 +1,31 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: hapi-fhir-cartagena
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: hapi-fhir-cartagena
+  template:
+    metadata:
+      labels:
+        app: hapi-fhir-cartagena
+    spec:
+      containers:
+      - name: hapi-fhir
+        image: hapiproject/hapi:v6.10.0
+        ports:
+        - containerPort: 8080
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: hapi-fhir-cartagena
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8080
+      targetPort: 8080
+  selector:
+    app: hapi-fhir-cartagena

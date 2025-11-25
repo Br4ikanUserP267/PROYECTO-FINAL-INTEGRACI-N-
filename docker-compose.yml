@@ -1,0 +1,60 @@
+version: '3.8'
+services:
+  postgres:
+    image: citusdata/citus:11.2
+    container_name: postgres_citus_cartagena
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpass
+      POSTGRES_DB: hce_cartagena
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./data/postgres:/var/lib/postgresql/data
+    networks:
+      - hce_net
+
+  postgrest:
+    image: postgrest/postgrest:v10.1.1
+    container_name: postgrest_cartagena
+    environment:
+      PGRST_DB_URI: postgres://admin:adminpass@postgres:5432/hce_cartagena
+      PGRST_DB_ANON_ROLE: web_anon
+      PGRST_DB_SCHEMA: public
+      PGRST_SERVER_PORT: 3000
+    depends_on:
+      - postgres
+    ports:
+      - "3000:3000"
+    networks:
+      - hce_net
+
+  hapi_fhir:
+    image: hapiproject/hapi:v6.10.0
+    container_name: hapi_fhir_cartagena
+    ports:
+      - "8080:8080"
+    networks:
+      - hce_net
+
+  fastapi_gateway:
+    build:
+      context: ./fastapi_gateway
+      dockerfile: Dockerfile
+    container_name: fastapi_gateway_cartagena
+    environment:
+      POSTGREST_URL: http://postgrest:3000
+      HAPI_FHIR_URL: http://hapi_fhir:8080/fhir
+      JWT_SECRET: "supersecretkey"
+      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgrest
+      - hapi_fhir
+    networks:
+      - hce_net
+
+networks:
+  hce_net:
+    driver: bridge
