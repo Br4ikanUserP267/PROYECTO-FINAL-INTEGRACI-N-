@@ -236,7 +236,72 @@ def add_routes(router, sede):
             raise HTTPException(status_code=404, detail="Examen no encontrado")
         return examen[0]
 
-    # ...agregar rutas para procedimientos, enfermedades, doctores, exportar, etc. siguiendo el mismo patrón...
+    # Procedimientos
+    @router.get("/api/procedimientos/{id_historia_clinica}", response_model=List[ProcedimientoResponse])
+    async def get_procedimientos(id_historia_clinica: str, user=Depends(get_current_user)):
+        procedimientos = await postgrest_get(f"procedimientos?id_historia_clinica=eq.{id_historia_clinica}")
+        return procedimientos
+
+    @router.get("/api/procedimientos/buscar", response_model=List[ProcedimientoBuscarResponse])
+    async def buscar_procedimientos(id_paciente: str, fecha_inicio: str, fecha_fin: str, user=Depends(get_current_user)):
+        procedimientos = await postgrest_get(f"procedimientos?id_paciente=eq.{id_paciente}&fecha=gte.{fecha_inicio}&fecha=lte.{fecha_fin}")
+        return procedimientos
+
+    @router.post("/api/procedimientos", response_model=ProcedimientoResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
+    async def create_procedimiento(request: ProcedimientoCreate):
+        procedimiento = await postgrest_post("procedimientos", request.dict())
+        return procedimiento
+
+    @router.get("/api/procedimientos/{id_procedimiento}", response_model=ProcedimientoResponse)
+    async def get_procedimiento(id_procedimiento: str, user=Depends(get_current_user)):
+        procedimiento = await postgrest_get(f"procedimientos?id_procedimiento=eq.{id_procedimiento}")
+        if not procedimiento:
+            raise HTTPException(status_code=404, detail="Procedimiento no encontrado")
+        return procedimiento[0]
+
+    # Enfermedades
+    @router.get("/api/enfermedades/{id_historia_clinica}", response_model=List[EnfermedadResponse])
+    async def get_enfermedades(id_historia_clinica: str, user=Depends(get_current_user)):
+        enfermedades = await postgrest_get(f"enfermedades?id_historia_clinica=eq.{id_historia_clinica}")
+        return enfermedades
+
+    @router.post("/api/enfermedades", response_model=EnfermedadResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
+    async def create_enfermedad(request: EnfermedadCreate):
+        enfermedad = await postgrest_post("enfermedades", request.dict())
+        return enfermedad
+
+    # Doctores
+    @router.get("/api/doctores/{id_doctor}", response_model=DoctorResponse)
+    async def get_doctor(id_doctor: str, user=Depends(get_current_user)):
+        doctor = await postgrest_get(f"doctores?id_doctor=eq.{id_doctor}")
+        if not doctor:
+            raise HTTPException(status_code=404, detail="Doctor no encontrado")
+        return doctor[0]
+
+    @router.get("/api/doctores/{id_doctor}/pacientes", response_model=List[DoctorPacienteResponse])
+    async def get_doctor_pacientes(id_doctor: str, user=Depends(get_current_user)):
+        pacientes = await postgrest_get(f"pacientes?id_doctor=eq.{id_doctor}")
+        return pacientes
+
+    # Exportar PDF
+    @router.post("/api/exportar/pdf", response_model=ExportarPDFResponse)
+    async def exportar_pdf(request: ExportarPDFRequest, user=Depends(get_current_user)):
+        # Simulación de generación de PDF
+        url = f"https://servidor/pdf/{request.id_historia_clinica}/{request.tipo}.pdf"
+        return ExportarPDFResponse(url=url)
+
+    # Exportar Excel
+    @router.post("/api/exportar/excel", response_model=ExportarExcelResponse)
+    async def exportar_excel(request: ExportarExcelRequest, user=Depends(get_current_user)):
+        # Simulación de generación de Excel
+        url = f"https://servidor/excel/{request.id_paciente}/{request.tipo}.xlsx"
+        return ExportarExcelResponse(url=url)
+
+    # Generar ID clínico
+    @router.post("/api/generar-id-clinico", response_model=GenerarIDClinicoResponse)
+    async def generar_id_clinico(request: GenerarIDClinicoRequest, user=Depends(get_current_user)):
+        id_clinico = f"HC-{str(request.id_paciente).zfill(8)}"
+        return GenerarIDClinicoResponse(id_clinico=id_clinico)
 
 add_routes(router_cartagena, "cartagena")
 add_routes(router_sincelejo, "sincelejo")
