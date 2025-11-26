@@ -1,8 +1,10 @@
 version: '3.8'
 
 services:
+  # ==================== BASES DE DATOS ====================
   postgres_citus_cartagena:
     image: citusdata/citus:11.2
+    container_name: postgres_citus_cartagena
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: adminpass
@@ -16,12 +18,15 @@ services:
       - hce_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d hce_cartagena"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
 
   postgres_citus_sincelejo:
     image: citusdata/citus:11.2
+    container_name: postgres_citus_sincelejo
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: adminpass
@@ -35,12 +40,15 @@ services:
       - hce_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d hce_sincelejo"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
 
   postgres_citus_monteria:
     image: citusdata/citus:11.2
+    container_name: postgres_citus_monteria
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: adminpass
@@ -54,12 +62,16 @@ services:
       - hce_net
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U admin -d hce_monteria"]
-      interval: 5s
+      interval: 10s
       timeout: 5s
-      retries: 10
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
 
+  # ==================== POSTGREST ====================
   postgrest_cartagena:
     image: postgrest/postgrest:v10.1.1
+    container_name: postgrest_cartagena
     environment:
       PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_cartagena:5432/hce_cartagena
       PGRST_DB_ANON_ROLE: web_anon
@@ -72,10 +84,11 @@ services:
       - "3000:3000"
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
   postgrest_sincelejo:
     image: postgrest/postgrest:v10.1.1
+    container_name: postgrest_sincelejo
     environment:
       PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_sincelejo:5432/hce_sincelejo
       PGRST_DB_ANON_ROLE: web_anon
@@ -88,10 +101,11 @@ services:
       - "3001:3001"
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
   postgrest_monteria:
     image: postgrest/postgrest:v10.1.1
+    container_name: postgrest_monteria
     environment:
       PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_monteria:5432/hce_monteria
       PGRST_DB_ANON_ROLE: web_anon
@@ -104,10 +118,12 @@ services:
       - "3002:3002"
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
+  # ==================== HAPI FHIR ====================
   hapi_fhir_cartagena:
     image: hapiproject/hapi:v6.10.0
+    container_name: hapi_fhir_cartagena
     ports:
       - "8080:8080"
     networks:
@@ -117,9 +133,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
+    restart: unless-stopped
 
   hapi_fhir_sincelejo:
     image: hapiproject/hapi:v6.10.0
+    container_name: hapi_fhir_sincelejo
     ports:
       - "8081:8080"
     networks:
@@ -129,9 +148,12 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
+    restart: unless-stopped
 
   hapi_fhir_monteria:
     image: hapiproject/hapi:v6.10.0
+    container_name: hapi_fhir_monteria
     ports:
       - "8082:8080"
     networks:
@@ -141,16 +163,20 @@ services:
       interval: 30s
       timeout: 10s
       retries: 5
+      start_period: 60s
+    restart: unless-stopped
 
+  # ==================== FASTAPI GATEWAYS ====================
   fastapi_gateway_cartagena:
     build:
       context: ./fastapi_gateway
       dockerfile: Dockerfile
+    container_name: fastapi_gateway_cartagena
     environment:
       POSTGREST_URL: http://postgrest_cartagena:3000
       HAPI_FHIR_URL: http://hapi_fhir_cartagena:8080/fhir
       JWT_SECRET: "supersecretkey"
-      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      SEDES_URLS: "http://fastapi_gateway_sincelejo:8000,http://fastapi_gateway_monteria:8000"
       PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_cartagena:5432/hce_cartagena"
     ports:
       - "8000:8000"
@@ -161,17 +187,18 @@ services:
         condition: service_started
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
   fastapi_gateway_sincelejo:
     build:
       context: ./fastapi_gateway
       dockerfile: Dockerfile
+    container_name: fastapi_gateway_sincelejo
     environment:
       POSTGREST_URL: http://postgrest_sincelejo:3001
       HAPI_FHIR_URL: http://hapi_fhir_sincelejo:8080/fhir
       JWT_SECRET: "supersecretkey"
-      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      SEDES_URLS: "http://fastapi_gateway_cartagena:8000,http://fastapi_gateway_monteria:8000"
       PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_sincelejo:5432/hce_sincelejo"
     ports:
       - "8001:8000"
@@ -182,17 +209,18 @@ services:
         condition: service_started
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
   fastapi_gateway_monteria:
     build:
       context: ./fastapi_gateway
       dockerfile: Dockerfile
+    container_name: fastapi_gateway_monteria
     environment:
       POSTGREST_URL: http://postgrest_monteria:3002
       HAPI_FHIR_URL: http://hapi_fhir_monteria:8080/fhir
       JWT_SECRET: "supersecretkey"
-      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      SEDES_URLS: "http://fastapi_gateway_cartagena:8000,http://fastapi_gateway_sincelejo:8000"
       PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_monteria:5432/hce_monteria"
     ports:
       - "8002:8000"
@@ -203,7 +231,7 @@ services:
         condition: service_started
     networks:
       - hce_net
-    restart: always
+    restart: unless-stopped
 
 volumes:
   cartagena_pgdata:
@@ -213,4 +241,3 @@ volumes:
 networks:
   hce_net:
     driver: bridge
-  

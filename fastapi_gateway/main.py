@@ -14,7 +14,8 @@ from schemas import (
     ExamenCreate, ExamenResponse, ExamenBuscarResponse,
     ProcedimientoCreate, ProcedimientoResponse, ProcedimientoBuscarResponse,
     EnfermedadCreate, EnfermedadResponse,
-    DoctorResponse, DoctorPacienteResponse,
+    DoctorResponse, DoctorPacienteResponse, DoctorCreate,
+    AdmisionistaCreate,
     ExportarPDFRequest, ExportarPDFResponse,
     ExportarExcelRequest, ExportarExcelResponse,
     GenerarIDClinicoRequest, GenerarIDClinicoResponse
@@ -96,8 +97,6 @@ async def query_all_sedes(endpoint: str, params: dict = None, client: httpx.Asyn
     # Consulta a otras sedes
     async def query_sede(sede_url):
         try:
-            # Las otras sedes tienen su propio PostgREST
-            # Necesitamos construir la URL correctamente
             response = await client.get(
                 f"{sede_url}/api/consulta-local/{endpoint}",
                 params=params,
@@ -654,27 +653,6 @@ async def generar_id_clinico(
     return GenerarIDClinicoResponse(id_clinico=id_clinico)
 
 # ==================== ADMINISTRACIÓN DE USUARIOS ====================
-
-class DoctorCreate(BaseModel):
-    usuario: str
-    contraseña: str
-    Nombres: str
-    Apellidos: str
-    cedula: str
-    especialidad: str
-    email: str
-    telefono: str
-    direccion: Optional[str] = None
-
-class AdmisionistaCreate(BaseModel):
-    usuario: str
-    contraseña: str
-    Nombres: str
-    Apellidos: str
-    cedula: str
-    email: str
-    telefono: str
-    direccion: Optional[str] = None
 
 @app.post("/api/admin/doctores")
 async def create_doctor(
