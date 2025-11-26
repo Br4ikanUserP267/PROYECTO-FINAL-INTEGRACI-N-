@@ -1,4 +1,5 @@
 version: '3.8'
+
 services:
   postgres_citus_cartagena:
     image: citusdata/citus:11.2
@@ -7,25 +8,103 @@ services:
       POSTGRES_PASSWORD: adminpass
       POSTGRES_DB: hce_cartagena
     ports:
-      - "5440:5432" # Externo:5440, Interno:5432
+      - "5440:5432"
     volumes:
       - cartagena_pgdata:/var/lib/postgresql/data
+      - ./data/postgres/init-webanon.sql:/docker-entrypoint-initdb.d/init-webanon.sql
     networks:
       - hce_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d hce_cartagena"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres_citus_sincelejo:
+    image: citusdata/citus:11.2
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpass
+      POSTGRES_DB: hce_sincelejo
+    ports:
+      - "5441:5432"
+    volumes:
+      - sincelejo_pgdata:/var/lib/postgresql/data
+      - ./data/postgres/init-webanon.sql:/docker-entrypoint-initdb.d/init-webanon.sql
+    networks:
+      - hce_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d hce_sincelejo"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres_citus_monteria:
+    image: citusdata/citus:11.2
+    environment:
+      POSTGRES_USER: admin
+      POSTGRES_PASSWORD: adminpass
+      POSTGRES_DB: hce_monteria
+    ports:
+      - "5442:5432"
+    volumes:
+      - monteria_pgdata:/var/lib/postgresql/data
+      - ./data/postgres/init-webanon.sql:/docker-entrypoint-initdb.d/init-webanon.sql
+    networks:
+      - hce_net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d hce_monteria"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
 
   postgrest_cartagena:
     image: postgrest/postgrest:v10.1.1
     environment:
-      PGRST_DB_URI: postgres://admin:adminpass@postgres_citus_cartagena:5432/hce_cartagena
+      PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_cartagena:5432/hce_cartagena
       PGRST_DB_ANON_ROLE: web_anon
       PGRST_DB_SCHEMA: public
       PGRST_SERVER_PORT: 3000
     depends_on:
-      - postgres_citus_cartagena
+      postgres_citus_cartagena:
+        condition: service_healthy
     ports:
       - "3000:3000"
     networks:
       - hce_net
+    restart: always
+
+  postgrest_sincelejo:
+    image: postgrest/postgrest:v10.1.1
+    environment:
+      PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_sincelejo:5432/hce_sincelejo
+      PGRST_DB_ANON_ROLE: web_anon
+      PGRST_DB_SCHEMA: public
+      PGRST_SERVER_PORT: 3001
+    depends_on:
+      postgres_citus_sincelejo:
+        condition: service_healthy
+    ports:
+      - "3001:3001"
+    networks:
+      - hce_net
+    restart: always
+
+  postgrest_monteria:
+    image: postgrest/postgrest:v10.1.1
+    environment:
+      PGRST_DB_URI: postgres://authenticator:secret@postgres_citus_monteria:5432/hce_monteria
+      PGRST_DB_ANON_ROLE: web_anon
+      PGRST_DB_SCHEMA: public
+      PGRST_SERVER_PORT: 3002
+    depends_on:
+      postgres_citus_monteria:
+        condition: service_healthy
+    ports:
+      - "3002:3002"
+    networks:
+      - hce_net
+    restart: always
 
   hapi_fhir_cartagena:
     image: hapiproject/hapi:v6.10.0
@@ -33,6 +112,35 @@ services:
       - "8080:8080"
     networks:
       - hce_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  hapi_fhir_sincelejo:
+    image: hapiproject/hapi:v6.10.0
+    ports:
+      - "8081:8080"
+    networks:
+      - hce_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  hapi_fhir_monteria:
+    image: hapiproject/hapi:v6.10.0
+    ports:
+      - "8082:8080"
+    networks:
+      - hce_net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/fhir/metadata"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
 
   fastapi_gateway_cartagena:
     build:
@@ -43,17 +151,66 @@ services:
       HAPI_FHIR_URL: http://hapi_fhir_cartagena:8080/fhir
       JWT_SECRET: "supersecretkey"
       SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_cartagena:5432/hce_cartagena"
     ports:
       - "8000:8000"
     depends_on:
-      - postgrest_cartagena
-      - hapi_fhir_cartagena
+      postgrest_cartagena:
+        condition: service_started
+      hapi_fhir_cartagena:
+        condition: service_started
     networks:
       - hce_net
+    restart: always
+
+  fastapi_gateway_sincelejo:
+    build:
+      context: ./fastapi_gateway
+      dockerfile: Dockerfile
+    environment:
+      POSTGREST_URL: http://postgrest_sincelejo:3001
+      HAPI_FHIR_URL: http://hapi_fhir_sincelejo:8080/fhir
+      JWT_SECRET: "supersecretkey"
+      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_sincelejo:5432/hce_sincelejo"
+    ports:
+      - "8001:8000"
+    depends_on:
+      postgrest_sincelejo:
+        condition: service_started
+      hapi_fhir_sincelejo:
+        condition: service_started
+    networks:
+      - hce_net
+    restart: always
+
+  fastapi_gateway_monteria:
+    build:
+      context: ./fastapi_gateway
+      dockerfile: Dockerfile
+    environment:
+      POSTGREST_URL: http://postgrest_monteria:3002
+      HAPI_FHIR_URL: http://hapi_fhir_monteria:8080/fhir
+      JWT_SECRET: "supersecretkey"
+      SEDES_URLS: "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000"
+      PGRST_DB_URI: "postgres://admin:adminpass@postgres_citus_monteria:5432/hce_monteria"
+    ports:
+      - "8002:8000"
+    depends_on:
+      postgrest_monteria:
+        condition: service_started
+      hapi_fhir_monteria:
+        condition: service_started
+    networks:
+      - hce_net
+    restart: always
 
 volumes:
   cartagena_pgdata:
+  sincelejo_pgdata:
+  monteria_pgdata:
 
 networks:
   hce_net:
     driver: bridge
+  

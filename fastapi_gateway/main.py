@@ -1,312 +1,749 @@
-import os
+from fastapi import FastAPI, HTTPException, Header, Depends
+from fastapi.middleware.cors import CORSMiddleware
+from typing import Optional, List
 import httpx
-from fastapi import FastAPI, Depends, HTTPException, status, Request
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from jose import JWTError, jwt
-from typing import List
-from schemas import *
+import os
+import jwt
+from datetime import datetime, timedelta
+import hashlib
+import asyncio
+from schemas import (
+    LoginRequest, LoginResponse, VerifyRequest, VerifyResponse, LogoutResponse,
+    PacienteCreate, PacienteUpdate, PacienteResponse, PacienteListItem,
+    HistoriaClinicaCreate, HistoriaClinicaUpdate, HistoriaClinicaResponse,
+    ExamenCreate, ExamenResponse, ExamenBuscarResponse,
+    ProcedimientoCreate, ProcedimientoResponse, ProcedimientoBuscarResponse,
+    EnfermedadCreate, EnfermedadResponse,
+    DoctorResponse, DoctorPacienteResponse,
+    ExportarPDFRequest, ExportarPDFResponse,
+    ExportarExcelRequest, ExportarExcelResponse,
+    GenerarIDClinicoRequest, GenerarIDClinicoResponse
+)
 
-# --- Configuración ---
+app = FastAPI(title="HCE Gateway API - Distribuida", version="2.0.0")
+
+# Configuración CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Variables de entorno
 POSTGREST_URL = os.getenv("POSTGREST_URL", "http://localhost:3000")
 HAPI_FHIR_URL = os.getenv("HAPI_FHIR_URL", "http://localhost:8080/fhir")
 JWT_SECRET = os.getenv("JWT_SECRET", "supersecretkey")
-SEDES_URLS = os.getenv("SEDES_URLS", "http://cartagena.fastapi:8000,http://sincelejo.fastapi:8000,http://monteria.fastapi:8000").split(",")
+JWT_ALGORITHM = "HS256"
+JWT_EXPIRATION_HOURS = 24
 
-from fastapi import APIRouter
-from fastapi.openapi.utils import get_openapi
+# URLs de otras sedes para consultas distribuidas
+SEDES_URLS = os.getenv("SEDES_URLS", "").split(",")
+SEDES_URLS = [url.strip() for url in SEDES_URLS if url.strip()]
 
-app = FastAPI(
-    title="API Gateway HCE Distribuido",
-    description="Sistema distribuido para Cartagena, Sincelejo y Montería. Todas las rutas requieren autenticación JWT en el header Authorization (Bearer <token>).",
-    version="1.0.0",
-    docs_url="/docs",
-    redoc_url="/redoc",
-    openapi_url="/openapi.json"
-)
-# --- Healthcheck ---
-# --- Custom OpenAPI para JWT ---
-def custom_openapi():
-    if app.openapi_schema:
-        return app.openapi_schema
-    openapi_schema = get_openapi(
-        title=app.title,
-        version=app.version,
-        description=app.description,
-        routes=app.routes,
-    )
-    # Añadir esquema de seguridad JWT
-    openapi_schema["components"]["securitySchemes"] = {
-        "BearerAuth": {
-            "type": "http",
-            "scheme": "bearer",
-            "bearerFormat": "JWT"
-        }
+# Cliente HTTP reutilizable
+async def get_http_client():
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        yield client
+
+# Funciones auxiliares JWT
+def create_token(id_usuario: int, rol: str) -> str:
+    payload = {
+        "id_usuario": id_usuario,
+        "rol": rol,
+        "exp": datetime.utcnow() + timedelta(hours=JWT_EXPIRATION_HOURS)
     }
-    for path in openapi_schema["paths"].values():
-        for method in path.values():
-            method["security"] = [{"BearerAuth": []}]
-    app.openapi_schema = openapi_schema
-    return app.openapi_schema
+    return jwt.encode(payload, JWT_SECRET, algorithm=JWT_ALGORITHM)
 
-app.openapi = custom_openapi
-
-# Routers por sede
-router_cartagena = APIRouter(prefix="/cartagena", tags=["Cartagena"])
-router_sincelejo = APIRouter(prefix="/sincelejo", tags=["Sincelejo"])
-router_monteria = APIRouter(prefix="/monteria", tags=["Montería"])
-security = HTTPBearer()
-
-# --- Utilidades JWT ---
-def create_jwt_token(data: dict) -> str:
-    return jwt.encode(data, JWT_SECRET, algorithm="HS256")
-
-def decode_jwt_token(token: str) -> dict:
+def verify_token(token: str) -> dict:
     try:
-        return jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-    except JWTError:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[JWT_ALGORITHM])
+        return {"valido": True, "rol": payload["rol"], "id_usuario": payload["id_usuario"]}
+    except jwt.ExpiredSignatureError:
+        raise HTTPException(status_code=401, detail="Token expirado")
+    except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Token inválido")
 
-# --- Dependencias de Seguridad ---
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    payload = decode_jwt_token(credentials.credentials)
-    return payload
+async def get_current_user(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Token no proporcionado")
+    token = authorization.split(" ")[1]
+    return verify_token(token)
 
-def require_role(*roles):
-    def role_checker(user=Depends(get_current_user)):
-        if user.get("rol") not in roles:
-            raise HTTPException(status_code=403, detail="Acceso denegado")
-        return user
-    return role_checker
+def hash_password(password: str) -> str:
+    return hashlib.sha256(password.encode()).hexdigest()
 
-# --- Integración PostgREST ---
-async def postgrest_get(path: str):
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{POSTGREST_URL}/{path}")
-        resp.raise_for_status()
-        return resp.json()
+# ==================== CONSULTAS DISTRIBUIDAS ====================
 
-async def postgrest_post(path: str, data: dict):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(f"{POSTGREST_URL}/{path}", json=data)
-        resp.raise_for_status()
-        return resp.json()
-
-async def postgrest_put(path: str, data: dict):
-    async with httpx.AsyncClient() as client:
-        resp = await client.put(f"{POSTGREST_URL}/{path}", json=data)
-        resp.raise_for_status()
-        return resp.json()
-
-# --- Integración HAPI FHIR ---
-async def hapi_fhir_get(resource: str, params: dict = None):
-    async with httpx.AsyncClient() as client:
-        resp = await client.get(f"{HAPI_FHIR_URL}/{resource}", params=params)
-        resp.raise_for_status()
-        return resp.json()
-
-async def hapi_fhir_post(resource: str, data: dict):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(f"{HAPI_FHIR_URL}/{resource}", json=data)
-        resp.raise_for_status()
-        return resp.json()
-
-async def hapi_fhir_put(resource: str, data: dict):
-    async with httpx.AsyncClient() as client:
-        resp = await client.put(f"{HAPI_FHIR_URL}/{resource}", json=data)
-        resp.raise_for_status()
-        return resp.json()
-
-
-# --- Función para registrar rutas por sede ---
-def add_routes(router, sede):
-    @router.post("/api/auth/login", response_model=LoginResponse)
-    async def login(request: LoginRequest):
-        usuarios = await postgrest_get(f"usuarios?usuario=eq.{request.usuario}")
-        if not usuarios or usuarios[0]["contraseña"] != request.contraseña:
-            raise HTTPException(status_code=401, detail="Credenciales inválidas")
-        usuario = usuarios[0]
-        token = create_jwt_token({"id_usuario": usuario["id_usuario"], "rol": usuario["rol"], "sede": sede})
-        return LoginResponse(token=token, rol=usuario["rol"], id_usuario=usuario["id_usuario"])
-
-    @router.post("/api/auth/verify", response_model=VerifyResponse)
-    async def verify(request: VerifyRequest):
+async def query_all_sedes(endpoint: str, params: dict = None, client: httpx.AsyncClient = None):
+    """
+    Consulta todas las sedes (local + remotas) y combina los resultados
+    """
+    results = []
+    
+    # Consulta local
+    try:
+        local_response = await client.get(f"{POSTGREST_URL}/{endpoint}", params=params)
+        if local_response.status_code == 200:
+            local_data = local_response.json()
+            for item in local_data:
+                item["sede_origen"] = "local"
+            results.extend(local_data)
+    except Exception as e:
+        print(f"Error consultando sede local: {e}")
+    
+    # Consulta a otras sedes
+    async def query_sede(sede_url):
         try:
-            payload = decode_jwt_token(request.token)
-            return VerifyResponse(valido=True, rol=payload["rol"], id_usuario=payload["id_usuario"])
-        except Exception:
-            return VerifyResponse(valido=False, rol="", id_usuario=0)
+            # Las otras sedes tienen su propio PostgREST
+            # Necesitamos construir la URL correctamente
+            response = await client.get(
+                f"{sede_url}/api/consulta-local/{endpoint}",
+                params=params,
+                timeout=5.0
+            )
+            if response.status_code == 200:
+                data = response.json()
+                for item in data:
+                    item["sede_origen"] = sede_url
+                return data
+        except Exception as e:
+            print(f"Error consultando sede {sede_url}: {e}")
+            return []
+    
+    # Ejecutar consultas en paralelo
+    if SEDES_URLS:
+        tasks = [query_sede(url) for url in SEDES_URLS]
+        remote_results = await asyncio.gather(*tasks)
+        for result in remote_results:
+            results.extend(result)
+    
+    return results
 
-    @router.post("/api/auth/logout", response_model=LogoutResponse)
-    async def logout():
-        return LogoutResponse(mensaje="Sesión cerrada correctamente")
+# Endpoint auxiliar para que otras sedes puedan consultar datos locales
+@app.get("/api/consulta-local/{tabla}")
+async def consulta_local(
+    tabla: str,
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    """
+    Endpoint para consultas entre sedes (sin autenticación para comunicación interna)
+    En producción, agregar autenticación con API key compartida
+    """
+    response = await client.get(f"{POSTGREST_URL}/{tabla}")
+    if response.status_code == 200:
+        return response.json()
+    return []
 
-    @router.get("/api/pacientes/{id_paciente}", response_model=PacienteResponse)
-    async def get_paciente(id_paciente: str, user=Depends(get_current_user)):
-        paciente = await postgrest_get(f"pacientes?id_paciente=eq.{id_paciente}")
-        if not paciente:
-            raise HTTPException(status_code=404, detail="Paciente no encontrado")
-        return paciente[0]
+# ==================== AUTENTICACIÓN ====================
 
-    @router.get("/api/pacientes", response_model=List[PacienteListItem])
-    async def list_pacientes(user=Depends(get_current_user)):
-        pacientes = await postgrest_get("pacientes")
-        return pacientes
+@app.post("/api/auth/login", response_model=LoginResponse)
+async def login(request: LoginRequest, client: httpx.AsyncClient = Depends(get_http_client)):
+    hashed_password = hash_password(request.contraseña)
+    
+    # Buscar en todas las sedes
+    # Primero buscar en pacientes
+    pacientes = await query_all_sedes(
+        "pacientes",
+        {"usuario": f"eq.{request.usuario}", "contraseña": f"eq.{hashed_password}"},
+        client
+    )
+    
+    if pacientes:
+        user = pacientes[0]
+        token = create_token(user["id_paciente"], "paciente")
+        return LoginResponse(token=token, rol="paciente", id_usuario=user["id_paciente"])
+    
+    # Buscar en doctores
+    doctores = await query_all_sedes(
+        "doctores",
+        {"usuario": f"eq.{request.usuario}", "contraseña": f"eq.{hashed_password}"},
+        client
+    )
+    
+    if doctores:
+        user = doctores[0]
+        token = create_token(user["id_doctor"], "medico")
+        return LoginResponse(token=token, rol="medico", id_usuario=user["id_doctor"])
+    
+    # Buscar en admisionistas
+    admisionistas = await query_all_sedes(
+        "admisionistas",
+        {"usuario": f"eq.{request.usuario}", "contraseña": f"eq.{hashed_password}"},
+        client
+    )
+    
+    if admisionistas:
+        user = admisionistas[0]
+        token = create_token(user["id_admisionista"], "admisionista")
+        return LoginResponse(token=token, rol="admisionista", id_usuario=user["id_admisionista"])
+    
+    raise HTTPException(status_code=401, detail="Credenciales inválidas")
 
-    @router.post("/api/pacientes", response_model=PacienteResponse)
-    async def create_paciente(request: PacienteCreate):
-        paciente = await postgrest_post("pacientes", request.dict())
-        return paciente
+@app.post("/api/auth/verify", response_model=VerifyResponse)
+async def verify(request: VerifyRequest):
+    result = verify_token(request.token)
+    return VerifyResponse(**result)
 
-    @router.put("/api/pacientes/{id_paciente}", response_model=LogoutResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def update_paciente(id_paciente: str, request: PacienteUpdate):
-        await postgrest_put(f"pacientes?id_paciente=eq.{id_paciente}", request.dict(exclude_unset=True))
-        return LogoutResponse(mensaje="Paciente actualizado exitosamente")
+@app.post("/api/auth/logout", response_model=LogoutResponse)
+async def logout(current_user: dict = Depends(get_current_user)):
+    return LogoutResponse(mensaje="Sesión cerrada exitosamente")
 
-    @router.get("/api/historia-clinica/{id_paciente}", response_model=List[HistoriaClinicaResponse])
-    async def federated_historia_clinica(id_paciente: str, user=Depends(get_current_user)):
-        # Consulta federada a todas las sedes
-        import asyncio
-        import httpx
-        results = []
-        async with httpx.AsyncClient() as client:
-            tasks = [client.get(f"{url}/api/historia-clinica/{id_paciente}") for url in SEDES_URLS]
-            responses = await asyncio.gather(*tasks)
-            for resp in responses:
-                if resp.status_code == 200:
-                    results.extend(resp.json())
-        return results
+# ==================== PACIENTES ====================
 
-    @router.post("/api/historia-clinica", response_model=HistoriaClinicaResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def create_historia_clinica(request: HistoriaClinicaCreate):
-        fhir_data = {
-            "resourceType": "Encounter",
-            "subject": {"reference": f"Patient/{request.id_paciente}"},
-            "participant": [{"individual": {"reference": f"Practitioner/{request.id_doctor}"}}],
-            "period": {"start": request.fecha},
-            "reasonCode": [{"text": request.motivo}],
-            "extension": [
-                {"url": "edad", "valueInteger": request.edad},
-                {"url": "estado_nutricion", "valueString": request.estado_nutricion},
-                {"url": "antecedentes_patologicos", "valueString": request.antecedentes_patologicos},
-                {"url": "sintomas_presentes", "valueString": request.sintomas_presentes},
-                {"url": "signos_presenciales", "valueString": request.signos_presenciales},
-                {"url": "tratamiento", "valueString": request.tratamiento}
-            ]
+@app.get("/api/pacientes/{id_paciente}", response_model=PacienteResponse)
+async def get_paciente(
+    id_paciente: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Buscar en todas las sedes
+    pacientes = await query_all_sedes(
+        "pacientes",
+        {"id_paciente": f"eq.{id_paciente}"},
+        client
+    )
+    
+    if not pacientes:
+        raise HTTPException(status_code=404, detail="Paciente no encontrado")
+    
+    return pacientes[0]
+
+@app.get("/api/pacientes", response_model=List[PacienteListItem])
+async def get_pacientes(
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Obtener pacientes de todas las sedes
+    pacientes = await query_all_sedes("pacientes", None, client)
+    
+    # Formatear respuesta
+    return [
+        {
+            "id_paciente": p["id_paciente"],
+            "Nombres": p["Nombres"],
+            "Apellidos": p["Apellidos"],
+            "cedula": p["cedula"],
+            "email": p["email"]
         }
-        fhir_resp = await hapi_fhir_post("Encounter", fhir_data)
-        return fhir_resp
+        for p in pacientes
+    ]
 
-    @router.put("/api/historia-clinica/{id_historia_clinica}", response_model=LogoutResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def update_historia_clinica(id_historia_clinica: str, request: HistoriaClinicaUpdate):
-        fhir_data = request.dict(exclude_unset=True)
-        await hapi_fhir_put(f"Encounter/{id_historia_clinica}", fhir_data)
-        return LogoutResponse(mensaje="Historia clínica actualizada")
+@app.post("/api/pacientes")
+async def create_paciente(
+    paciente: PacienteCreate,
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Verificar si el usuario ya existe en alguna sede
+    usuarios = await query_all_sedes(
+        "pacientes",
+        {"usuario": f"eq.{paciente.usuario}"},
+        client
+    )
+    
+    if usuarios:
+        raise HTTPException(status_code=400, detail="El usuario ya existe")
+    
+    # Crear solo en la sede local
+    data = paciente.dict()
+    data["contraseña"] = hash_password(data["contraseña"])
+    
+    response = await client.post(
+        f"{POSTGREST_URL}/pacientes",
+        json=data,
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear paciente")
+    
+    created = response.json()[0]
+    return {"id_paciente": created["id_paciente"], "mensaje": "Paciente creado exitosamente"}
 
-    @router.get("/api/examenes/{id_historia_clinica}", response_model=List[ExamenResponse])
-    async def get_examenes(id_historia_clinica: str, user=Depends(get_current_user)):
-        examenes = await postgrest_get(f"examenes?id_historia_clinica=eq.{id_historia_clinica}")
-        return examenes
+@app.put("/api/pacientes/{id_paciente}")
+async def update_paciente(
+    id_paciente: int,
+    paciente: PacienteUpdate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    data = {k: v for k, v in paciente.dict().items() if v is not None}
+    
+    # Actualizar solo en sede local (considerar replicación)
+    response = await client.patch(
+        f"{POSTGREST_URL}/pacientes?id_paciente=eq.{id_paciente}",
+        json=data
+    )
+    
+    if response.status_code != 204:
+        raise HTTPException(status_code=500, detail="Error al actualizar paciente")
+    
+    return {"mensaje": "Paciente actualizado exitosamente"}
 
-    @router.get("/api/examenes/buscar", response_model=List[ExamenBuscarResponse])
-    async def buscar_examenes(id_paciente: str, fecha_inicio: str, fecha_fin: str, user=Depends(get_current_user)):
-        examenes = await postgrest_get(f"examenes?id_paciente=eq.{id_paciente}&fecha=gte.{fecha_inicio}&fecha=lte.{fecha_fin}")
-        return examenes
+# ==================== HISTORIA CLÍNICA DISTRIBUIDA ====================
 
-    @router.post("/api/examenes", response_model=ExamenResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def create_examen(request: ExamenCreate):
-        fhir_data = {
-            "resourceType": "Observation",
-            "encounter": {"reference": f"Encounter/{request.id_historia_clinica}"},
-            "code": {"text": request.nombre_examen},
-            "valueQuantity": {"value": request.resultado},
-            "interpretation": [{"text": request.valor}],
-            "extension": [
-                {"url": "descripcion", "valueString": request.descripcion},
-                {"url": "valor_bajo", "valueDecimal": request.valor_bajo},
-                {"url": "valor_alto", "valueDecimal": request.valor_alto}
-            ]
-        }
-        fhir_resp = await hapi_fhir_post("Observation", fhir_data)
-        return fhir_resp
+@app.get("/api/historia-clinica/{id_paciente}", response_model=List[HistoriaClinicaResponse])
+async def get_historia_clinica(
+    id_paciente: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    """
+    Obtiene TODA la historia clínica del paciente de TODAS las sedes
+    """
+    historias = await query_all_sedes(
+        "historia_clinica",
+        {"id_paciente": f"eq.{id_paciente}"},
+        client
+    )
+    
+    # Ordenar por fecha descendente
+    historias.sort(key=lambda x: x.get("fecha", ""), reverse=True)
+    
+    return historias
 
-    @router.get("/api/examenes/{id_examen}", response_model=ExamenResponse)
-    async def get_examen(id_examen: str, user=Depends(get_current_user)):
-        examen = await postgrest_get(f"examenes?id_examen=eq.{id_examen}")
-        if not examen:
-            raise HTTPException(status_code=404, detail="Examen no encontrado")
-        return examen[0]
+@app.post("/api/historia-clinica")
+async def create_historia_clinica(
+    historia: HistoriaClinicaCreate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Crear en sede local
+    response = await client.post(
+        f"{POSTGREST_URL}/historia_clinica",
+        json=historia.dict(),
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear historia clínica")
+    
+    created = response.json()[0]
+    return {"id_historia_clinica": created["id_historia_clinica"], "mensaje": "Historia clínica registrada"}
 
-    # Procedimientos
-    @router.get("/api/procedimientos/{id_historia_clinica}", response_model=List[ProcedimientoResponse])
-    async def get_procedimientos(id_historia_clinica: str, user=Depends(get_current_user)):
-        procedimientos = await postgrest_get(f"procedimientos?id_historia_clinica=eq.{id_historia_clinica}")
-        return procedimientos
+@app.put("/api/historia-clinica/{id_historia_clinica}")
+async def update_historia_clinica(
+    id_historia_clinica: int,
+    historia: HistoriaClinicaUpdate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    data = {k: v for k, v in historia.dict().items() if v is not None}
+    
+    response = await client.patch(
+        f"{POSTGREST_URL}/historia_clinica?id_historia_clinica=eq.{id_historia_clinica}",
+        json=data
+    )
+    
+    if response.status_code != 204:
+        raise HTTPException(status_code=500, detail="Error al actualizar historia clínica")
+    
+    return {"mensaje": "Historia clínica actualizada"}
 
-    @router.get("/api/procedimientos/buscar", response_model=List[ProcedimientoBuscarResponse])
-    async def buscar_procedimientos(id_paciente: str, fecha_inicio: str, fecha_fin: str, user=Depends(get_current_user)):
-        procedimientos = await postgrest_get(f"procedimientos?id_paciente=eq.{id_paciente}&fecha=gte.{fecha_inicio}&fecha=lte.{fecha_fin}")
-        return procedimientos
+# ==================== EXÁMENES DISTRIBUIDOS ====================
 
-    @router.post("/api/procedimientos", response_model=ProcedimientoResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def create_procedimiento(request: ProcedimientoCreate):
-        procedimiento = await postgrest_post("procedimientos", request.dict())
-        return procedimiento
+@app.get("/api/examenes/{id_historia_clinica}", response_model=List[ExamenResponse])
+async def get_examenes(
+    id_historia_clinica: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    examenes = await query_all_sedes(
+        "examenes",
+        {"id_historia_clinica": f"eq.{id_historia_clinica}"},
+        client
+    )
+    
+    return examenes
 
-    @router.get("/api/procedimientos/{id_procedimiento}", response_model=ProcedimientoResponse)
-    async def get_procedimiento(id_procedimiento: str, user=Depends(get_current_user)):
-        procedimiento = await postgrest_get(f"procedimientos?id_procedimiento=eq.{id_procedimiento}")
-        if not procedimiento:
-            raise HTTPException(status_code=404, detail="Procedimiento no encontrado")
-        return procedimiento[0]
+@app.get("/api/examenes/buscar", response_model=List[ExamenBuscarResponse])
+async def buscar_examenes(
+    id_paciente: int,
+    fecha_inicio: str,
+    fecha_fin: str,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Obtener historias clínicas de todas las sedes
+    historias = await query_all_sedes("historia_clinica", None, client)
+    historias = [
+        h for h in historias
+        if h["id_paciente"] == id_paciente
+        and fecha_inicio <= h.get("fecha", "") <= fecha_fin
+    ]
+    
+    if not historias:
+        return []
+    
+    # Obtener exámenes de todas las sedes
+    examenes = await query_all_sedes("examenes", None, client)
+    
+    ids_historias = {h["id_historia_clinica"] for h in historias}
+    examenes = [e for e in examenes if e["id_historia_clinica"] in ids_historias]
+    
+    # Enriquecer con información de la historia
+    resultado = []
+    for examen in examenes:
+        historia = next((h for h in historias if h["id_historia_clinica"] == examen["id_historia_clinica"]), None)
+        if historia:
+            estado = "Normal" if examen["valor_bajo"] <= examen["resultado"] <= examen["valor_alto"] else "Anormal"
+            resultado.append({
+                "id_examen": examen["id_examen"],
+                "id_historia_clinica": examen["id_historia_clinica"],
+                "id_paciente": id_paciente,
+                "nombre_examen": examen["nombre_examen"],
+                "resultado": examen["resultado"],
+                "fecha": historia["fecha"],
+                "estado": estado
+            })
+    
+    return resultado
 
-    # Enfermedades
-    @router.get("/api/enfermedades/{id_historia_clinica}", response_model=List[EnfermedadResponse])
-    async def get_enfermedades(id_historia_clinica: str, user=Depends(get_current_user)):
-        enfermedades = await postgrest_get(f"enfermedades?id_historia_clinica=eq.{id_historia_clinica}")
-        return enfermedades
+@app.post("/api/examenes")
+async def create_examen(
+    examen: ExamenCreate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    response = await client.post(
+        f"{POSTGREST_URL}/examenes",
+        json=examen.dict(),
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear examen")
+    
+    created = response.json()[0]
+    return {"id_examen": created["id_examen"], "mensaje": "Examen registrado"}
 
-    @router.post("/api/enfermedades", response_model=EnfermedadResponse, dependencies=[Depends(require_role("medico", "historificacion"))])
-    async def create_enfermedad(request: EnfermedadCreate):
-        enfermedad = await postgrest_post("enfermedades", request.dict())
-        return enfermedad
+@app.get("/api/examenes/{id_examen}", response_model=ExamenResponse)
+async def get_examen(
+    id_examen: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    examenes = await query_all_sedes(
+        "examenes",
+        {"id_examen": f"eq.{id_examen}"},
+        client
+    )
+    
+    if not examenes:
+        raise HTTPException(status_code=404, detail="Examen no encontrado")
+    
+    return examenes[0]
 
-    # Doctores
-    @router.get("/api/doctores/{id_doctor}", response_model=DoctorResponse)
-    async def get_doctor(id_doctor: str, user=Depends(get_current_user)):
-        doctor = await postgrest_get(f"doctores?id_doctor=eq.{id_doctor}")
-        if not doctor:
-            raise HTTPException(status_code=404, detail="Doctor no encontrado")
-        return doctor[0]
+# ==================== PROCEDIMIENTOS DISTRIBUIDOS ====================
 
-    @router.get("/api/doctores/{id_doctor}/pacientes", response_model=List[DoctorPacienteResponse])
-    async def get_doctor_pacientes(id_doctor: str, user=Depends(get_current_user)):
-        pacientes = await postgrest_get(f"pacientes?id_doctor=eq.{id_doctor}")
-        return pacientes
+@app.get("/api/procedimientos/{id_historia_clinica}", response_model=List[ProcedimientoResponse])
+async def get_procedimientos(
+    id_historia_clinica: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    procedimientos = await query_all_sedes(
+        "procedimientos",
+        {"id_historia_clinica": f"eq.{id_historia_clinica}"},
+        client
+    )
+    
+    return procedimientos
 
-    # Exportar PDF
-    @router.post("/api/exportar/pdf", response_model=ExportarPDFResponse)
-    async def exportar_pdf(request: ExportarPDFRequest, user=Depends(get_current_user)):
-        # Simulación de generación de PDF
-        url = f"https://servidor/pdf/{request.id_historia_clinica}/{request.tipo}.pdf"
-        return ExportarPDFResponse(url=url)
+@app.get("/api/procedimientos/buscar", response_model=List[ProcedimientoBuscarResponse])
+async def buscar_procedimientos(
+    id_paciente: int,
+    fecha_inicio: str,
+    fecha_fin: str,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Obtener historias de todas las sedes
+    historias = await query_all_sedes("historia_clinica", None, client)
+    historias = [
+        h for h in historias
+        if h["id_paciente"] == id_paciente
+        and fecha_inicio <= h.get("fecha", "") <= fecha_fin
+    ]
+    
+    if not historias:
+        return []
+    
+    # Obtener procedimientos de todas las sedes
+    procedimientos = await query_all_sedes("procedimientos", None, client)
+    
+    ids_historias = {h["id_historia_clinica"] for h in historias}
+    procedimientos = [p for p in procedimientos if p["id_historia_clinica"] in ids_historias]
+    
+    resultado = []
+    for proc in procedimientos:
+        historia = next((h for h in historias if h["id_historia_clinica"] == proc["id_historia_clinica"]), None)
+        if historia:
+            resultado.append({
+                "id_procedimiento": proc["id_procedimiento"],
+                "id_paciente": id_paciente,
+                "nombre_procedimiento": proc["nombre_procedimiento"],
+                "resultado": proc["resultado"],
+                "fecha": historia["fecha"]
+            })
+    
+    return resultado
 
-    # Exportar Excel
-    @router.post("/api/exportar/excel", response_model=ExportarExcelResponse)
-    async def exportar_excel(request: ExportarExcelRequest, user=Depends(get_current_user)):
-        # Simulación de generación de Excel
-        url = f"https://servidor/excel/{request.id_paciente}/{request.tipo}.xlsx"
-        return ExportarExcelResponse(url=url)
+@app.post("/api/procedimientos")
+async def create_procedimiento(
+    procedimiento: ProcedimientoCreate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    response = await client.post(
+        f"{POSTGREST_URL}/procedimientos",
+        json=procedimiento.dict(),
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear procedimiento")
+    
+    created = response.json()[0]
+    return {"id_procedimiento": created["id_procedimiento"], "mensaje": "Procedimiento registrado"}
 
-    # Generar ID clínico
-    @router.post("/api/generar-id-clinico", response_model=GenerarIDClinicoResponse)
-    async def generar_id_clinico(request: GenerarIDClinicoRequest, user=Depends(get_current_user)):
-        id_clinico = f"HC-{str(request.id_paciente).zfill(8)}"
-        return GenerarIDClinicoResponse(id_clinico=id_clinico)
+@app.get("/api/procedimientos/{id_procedimiento}", response_model=ProcedimientoResponse)
+async def get_procedimiento(
+    id_procedimiento: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    procedimientos = await query_all_sedes(
+        "procedimientos",
+        {"id_procedimiento": f"eq.{id_procedimiento}"},
+        client
+    )
+    
+    if not procedimientos:
+        raise HTTPException(status_code=404, detail="Procedimiento no encontrado")
+    
+    return procedimientos[0]
 
-add_routes(router_cartagena, "cartagena")
-add_routes(router_sincelejo, "sincelejo")
-add_routes(router_monteria, "monteria")
+# ==================== ENFERMEDADES ====================
 
-app.include_router(router_cartagena)
-app.include_router(router_sincelejo)
-app.include_router(router_monteria)
+@app.get("/api/enfermedades/{id_historia_clinica}", response_model=List[EnfermedadResponse])
+async def get_enfermedades(
+    id_historia_clinica: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    enfermedades = await query_all_sedes(
+        "enfermedades",
+        {"id_historia_clinica": f"eq.{id_historia_clinica}"},
+        client
+    )
+    
+    return enfermedades
+
+@app.post("/api/enfermedades")
+async def create_enfermedad(
+    enfermedad: EnfermedadCreate,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    response = await client.post(
+        f"{POSTGREST_URL}/enfermedades",
+        json=enfermedad.dict(),
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear enfermedad")
+    
+    created = response.json()[0]
+    return {"id_Enfermedad": created["id_Enfermedad"], "mensaje": "Enfermedad registrada"}
+
+# ==================== DOCTORES ====================
+
+@app.get("/api/doctores/{id_doctor}", response_model=DoctorResponse)
+async def get_doctor(
+    id_doctor: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    doctores = await query_all_sedes(
+        "doctores",
+        {"id_doctor": f"eq.{id_doctor}"},
+        client
+    )
+    
+    if not doctores:
+        raise HTTPException(status_code=404, detail="Doctor no encontrado")
+    
+    return doctores[0]
+
+@app.get("/api/doctores/{id_doctor}/pacientes", response_model=List[DoctorPacienteResponse])
+async def get_doctor_pacientes(
+    id_doctor: int,
+    current_user: dict = Depends(get_current_user),
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    # Obtener historias clínicas de todas las sedes
+    historias = await query_all_sedes(
+        "historia_clinica",
+        {"id_doctor": f"eq.{id_doctor}"},
+        client
+    )
+    
+    historias.sort(key=lambda x: x.get("fecha", ""), reverse=True)
+    
+    # Agrupar por paciente
+    pacientes_dict = {}
+    for h in historias:
+        id_pac = h["id_paciente"]
+        if id_pac not in pacientes_dict:
+            pacientes_dict[id_pac] = {
+                "id_paciente": id_pac,
+                "edad": h["edad"],
+                "ultima_consulta": h["fecha"]
+            }
+    
+    if not pacientes_dict:
+        return []
+    
+    # Obtener información de pacientes de todas las sedes
+    pacientes = await query_all_sedes("pacientes", None, client)
+    
+    resultado = []
+    for pac in pacientes:
+        info = pacientes_dict.get(pac["id_paciente"])
+        if info:
+            resultado.append({
+                "id_paciente": pac["id_paciente"],
+                "Nombres": pac["Nombres"],
+                "Apellidos": pac["Apellidos"],
+                "cedula": pac["cedula"],
+                "edad": info["edad"],
+                "ultima_consulta": info["ultima_consulta"]
+            })
+    
+    return resultado
+
+# ==================== EXPORTACIÓN ====================
+
+@app.post("/api/exportar/pdf", response_model=ExportarPDFResponse)
+async def exportar_pdf(
+    request: ExportarPDFRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    url = f"/exports/pdf/{request.id_historia_clinica}_{request.tipo}_{datetime.now().strftime('%Y%m%d%H%M%S')}.pdf"
+    return ExportarPDFResponse(url=url)
+
+@app.post("/api/exportar/excel", response_model=ExportarExcelResponse)
+async def exportar_excel(
+    request: ExportarExcelRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    url = f"/exports/excel/{request.id_paciente}_{request.tipo}_{datetime.now().strftime('%Y%m%d%H%M%S')}.xlsx"
+    return ExportarExcelResponse(url=url)
+
+# ==================== GENERAR ID CLÍNICO ====================
+
+@app.post("/api/generar-id-clinico", response_model=GenerarIDClinicoResponse)
+async def generar_id_clinico(
+    request: GenerarIDClinicoRequest,
+    current_user: dict = Depends(get_current_user)
+):
+    id_clinico = f"HC-{request.id_paciente:08d}"
+    return GenerarIDClinicoResponse(id_clinico=id_clinico)
+
+# ==================== ADMINISTRACIÓN DE USUARIOS ====================
+
+class DoctorCreate(BaseModel):
+    usuario: str
+    contraseña: str
+    Nombres: str
+    Apellidos: str
+    cedula: str
+    especialidad: str
+    email: str
+    telefono: str
+    direccion: Optional[str] = None
+
+class AdmisionistaCreate(BaseModel):
+    usuario: str
+    contraseña: str
+    Nombres: str
+    Apellidos: str
+    cedula: str
+    email: str
+    telefono: str
+    direccion: Optional[str] = None
+
+@app.post("/api/admin/doctores")
+async def create_doctor(
+    doctor: DoctorCreate,
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    """
+    Crear un doctor (sin autenticación por ahora - agregar en producción)
+    """
+    # Verificar si el usuario ya existe
+    check = await client.get(f"{POSTGREST_URL}/doctores?usuario=eq.{doctor.usuario}")
+    if check.json():
+        raise HTTPException(status_code=400, detail="El usuario ya existe")
+    
+    # Hash de la contraseña
+    data = doctor.dict()
+    data["contraseña"] = hash_password(data["contraseña"])
+    
+    response = await client.post(
+        f"{POSTGREST_URL}/doctores",
+        json=data,
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear doctor")
+    
+    created = response.json()[0]
+    return {"id_doctor": created["id_doctor"], "mensaje": "Doctor creado exitosamente"}
+
+@app.post("/api/admin/admisionistas")
+async def create_admisionista(
+    admisionista: AdmisionistaCreate,
+    client: httpx.AsyncClient = Depends(get_http_client)
+):
+    """
+    Crear un admisionista (sin autenticación por ahora - agregar en producción)
+    """
+    # Verificar si el usuario ya existe
+    check = await client.get(f"{POSTGREST_URL}/admisionistas?usuario=eq.{admisionista.usuario}")
+    if check.json():
+        raise HTTPException(status_code=400, detail="El usuario ya existe")
+    
+    # Hash de la contraseña
+    data = admisionista.dict()
+    data["contraseña"] = hash_password(data["contraseña"])
+    
+    response = await client.post(
+        f"{POSTGREST_URL}/admisionistas",
+        json=data,
+        headers={"Prefer": "return=representation"}
+    )
+    
+    if response.status_code != 201:
+        raise HTTPException(status_code=500, detail="Error al crear admisionista")
+    
+    created = response.json()[0]
+    return {"id_admisionista": created["id_admisionista"], "mensaje": "Admisionista creado exitosamente"}
+
+# ==================== HEALTH CHECK ====================
+
+@app.get("/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "timestamp": datetime.utcnow().isoformat(),
+        "sedes_configuradas": len(SEDES_URLS)
+    }
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)

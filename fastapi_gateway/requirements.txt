@@ -4,3 +4,5 @@ httpx
 python-jose[cryptography]
 pydantic
 PyJWT
+
+asyncpg
