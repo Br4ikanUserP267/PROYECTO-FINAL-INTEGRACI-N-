@@ -1,3 +1,9 @@
+---
+noteId: "4964c600ca7911f09f30b5c4e850a448"
+tags: []
+
+---
+
 # Guía Completa: Frontend para Sistema HCE Distribuido
 
 ## 📋 Índice
