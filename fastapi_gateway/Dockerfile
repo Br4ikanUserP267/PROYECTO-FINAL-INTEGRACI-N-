@@ -1,11 +1,12 @@
-# Dockerfile para FastAPI Gateway
 FROM python:3.11-slim
 
 WORKDIR /app
 
+# Copiamos requirements primero para aprovechar la caché de Docker
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
+# CORRECCIÓN AQUÍ: Copiamos todo el contenido actual (.) al directorio de trabajo (.)
 COPY . .
 
 EXPOSE 8000

@@ -4,5 +4,9 @@ httpx
 python-jose[cryptography]
 pydantic
 PyJWT
-
 asyncpg
+starlette
+python-dotenv
+passlib
+bcrypt==4.0.1
+fpdf

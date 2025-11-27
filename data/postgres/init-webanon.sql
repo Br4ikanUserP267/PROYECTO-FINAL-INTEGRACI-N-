@@ -1,9 +1,8 @@
--- Script de inicialización para PostgreSQL con Citus
--- Sistema de Historia Clínica Electrónica Distribuida
+-- ====================================================================================
+-- SISTEMA DE HISTORIA CLÍNICA ELECTRÓNICA - INICIALIZACIÓN COMPLETA (CORREGIDO)
+-- ====================================================================================
 
--- ==================== ROLES Y PERMISOS ====================
-
--- Crear rol authenticator si no existe
+-- 1. CONFIGURACIÓN DE ROLES
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticator') THEN
@@ -12,7 +11,6 @@ BEGIN
 END
 $$;
 
--- Crear rol web_anon si no existe
 DO $$
 BEGIN
     IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'web_anon') THEN
@@ -21,66 +19,55 @@ BEGIN
 END
 $$;
 
--- Dar permisos
 GRANT web_anon TO authenticator;
 
--- ==================== EXTENSIONES ====================
-
--- Habilitar extensión Citus para distribución
+-- 2. EXTENSIONES
 CREATE EXTENSION IF NOT EXISTS citus;
 
--- ==================== TABLAS ====================
-
--- Tabla: Pacientes
+-- 3. CREACIÓN DE TABLAS
 CREATE TABLE IF NOT EXISTS pacientes (
     id_paciente SERIAL PRIMARY KEY,
     usuario VARCHAR(50) UNIQUE NOT NULL,
-    contraseña VARCHAR(255) NOT NULL,
-    Nombres VARCHAR(100) NOT NULL,
-    Apellidos VARCHAR(100) NOT NULL,
+    contrasena VARCHAR(255) NOT NULL,
+    nombres VARCHAR(100) NOT NULL,
+    apellidos VARCHAR(100) NOT NULL,
     cedula VARCHAR(20) UNIQUE NOT NULL,
     email VARCHAR(100),
     telefono VARCHAR(20),
     direccion TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Doctores
 CREATE TABLE IF NOT EXISTS doctores (
     id_doctor SERIAL PRIMARY KEY,
     usuario VARCHAR(50) UNIQUE NOT NULL,
-    contraseña VARCHAR(255) NOT NULL,
-    Nombres VARCHAR(100) NOT NULL,
-    Apellidos VARCHAR(100) NOT NULL,
+    contrasena VARCHAR(255) NOT NULL,
+    nombres VARCHAR(100) NOT NULL,
+    apellidos VARCHAR(100) NOT NULL,
     cedula VARCHAR(20) UNIQUE NOT NULL,
     especialidad VARCHAR(100),
     celula VARCHAR(50),
     email VARCHAR(100),
     telefono VARCHAR(20),
-    id_Estado_civil INTEGER,
+    id_estado_civil INTEGER,
     talentono VARCHAR(100),
     direccion TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Admisionistas
 CREATE TABLE IF NOT EXISTS admisionistas (
     id_admisionista SERIAL PRIMARY KEY,
     usuario VARCHAR(50) UNIQUE NOT NULL,
-    contraseña VARCHAR(255) NOT NULL,
-    Nombres VARCHAR(100) NOT NULL,
-    Apellidos VARCHAR(100) NOT NULL,
+    contrasena VARCHAR(255) NOT NULL,
+    nombres VARCHAR(100) NOT NULL,
+    apellidos VARCHAR(100) NOT NULL,
     cedula VARCHAR(20) UNIQUE NOT NULL,
     email VARCHAR(100),
     telefono VARCHAR(20),
     direccion TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Historia Clínica
 CREATE TABLE IF NOT EXISTS historia_clinica (
     id_historia_clinica SERIAL PRIMARY KEY,
     id_paciente INTEGER NOT NULL REFERENCES pacientes(id_paciente) ON DELETE CASCADE,
@@ -93,11 +80,9 @@ CREATE TABLE IF NOT EXISTS historia_clinica (
     sintomas_presentes TEXT,
     signos_presenciales TEXT,
     tratamiento TEXT,
-    created_at TIMESTAMP DEFAULT NOW(),
-    updated_at TIMESTAMP DEFAULT NOW()
+    created_at TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Exámenes
 CREATE TABLE IF NOT EXISTS examenes (
     id_examen SERIAL PRIMARY KEY,
     id_historia_clinica INTEGER NOT NULL REFERENCES historia_clinica(id_historia_clinica) ON DELETE CASCADE,
@@ -110,7 +95,6 @@ CREATE TABLE IF NOT EXISTS examenes (
     fecha_registro TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Procedimientos
 CREATE TABLE IF NOT EXISTS procedimientos (
     id_procedimiento SERIAL PRIMARY KEY,
     id_historia_clinica INTEGER NOT NULL REFERENCES historia_clinica(id_historia_clinica) ON DELETE CASCADE,
@@ -120,96 +104,56 @@ CREATE TABLE IF NOT EXISTS procedimientos (
     fecha_registro TIMESTAMP DEFAULT NOW()
 );
 
--- Tabla: Enfermedades
 CREATE TABLE IF NOT EXISTS enfermedades (
-    id_Enfermedad SERIAL PRIMARY KEY,
+    id_enfermedad SERIAL PRIMARY KEY,
     id_historia_clinica INTEGER NOT NULL REFERENCES historia_clinica(id_historia_clinica) ON DELETE CASCADE,
-    Codigo VARCHAR(20),
-    Enfermedad VARCHAR(200) NOT NULL,
+    codigo VARCHAR(20),
+    enfermedad VARCHAR(200) NOT NULL,
     created_at TIMESTAMP DEFAULT NOW()
 );
 
--- ==================== ÍNDICES ====================
-
--- Índices para mejorar rendimiento de consultas distribuidas
-CREATE INDEX IF NOT EXISTS idx_pacientes_cedula ON pacientes(cedula);
+-- 4. ÍNDICES
 CREATE INDEX IF NOT EXISTS idx_pacientes_usuario ON pacientes(usuario);
-
-CREATE INDEX IF NOT EXISTS idx_doctores_cedula ON doctores(cedula);
 CREATE INDEX IF NOT EXISTS idx_doctores_usuario ON doctores(usuario);
-CREATE INDEX IF NOT EXISTS idx_doctores_especialidad ON doctores(especialidad);
-
+CREATE INDEX IF NOT EXISTS idx_admisionistas_usuario ON admisionistas(usuario);
 CREATE INDEX IF NOT EXISTS idx_historia_paciente ON historia_clinica(id_paciente);
-CREATE INDEX IF NOT EXISTS idx_historia_doctor ON historia_clinica(id_doctor);
-CREATE INDEX IF NOT EXISTS idx_historia_fecha ON historia_clinica(fecha);
 
-CREATE INDEX IF NOT EXISTS idx_examenes_historia ON examenes(id_historia_clinica);
-CREATE INDEX IF NOT EXISTS idx_procedimientos_historia ON procedimientos(id_historia_clinica);
-CREATE INDEX IF NOT EXISTS idx_enfermedades_historia ON enfermedades(id_historia_clinica);
-
--- ==================== PERMISOS ====================
-
--- Otorgar permisos completos al rol web_anon (para desarrollo)
--- En producción, usar permisos más restrictivos
+-- 5. PERMISOS
 GRANT USAGE ON SCHEMA public TO web_anon;
 GRANT ALL ON ALL TABLES IN SCHEMA public TO web_anon;
 GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO web_anon;
-
--- Permitir acceso futuro a nuevas tablas
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON TABLES TO web_anon;
 ALTER DEFAULT PRIVILEGES IN SCHEMA public GRANT ALL ON SEQUENCES TO web_anon;
 
--- ==================== DATOS DE PRUEBA ====================
-
--- Insertar datos de prueba solo si las tablas están vacías
-
--- Doctor de prueba
+-- 6. DATOS DE PRUEBA ACTUALIZADOS
+-- Nota: La contraseña para "secret" DEBE ser el hash válido generado con passlib+bcrypt
 DO $$
+DECLARE
+    -- ✅ CORRECCIÓN: Este es el hash VÁLIDO que generamos y probamos
+    pass_hash VARCHAR := '$2b$12$2S1aKEo1j45f9EDPQMdo0es0mbbcmzzy6A.4uzSi8kKKjEf69dYzK';
 BEGIN
+    -- ADMISIONISTA
+    IF NOT EXISTS (SELECT 1 FROM admisionistas WHERE usuario = 'admin') THEN
+        INSERT INTO admisionistas (usuario, contrasena, nombres, apellidos, cedula, email, telefono)
+        VALUES ('admin', pass_hash, 'Super','Admin','0000000000','admin@hospital.com','0000000000');
+    END IF;
+
+    -- DOCTOR
     IF NOT EXISTS (SELECT 1 FROM doctores WHERE usuario = 'doctor1') THEN
-        INSERT INTO doctores (usuario, contraseña, Nombres, Apellidos, cedula, especialidad, email, telefono)
-        VALUES ('doctor1', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'Juan Carlos', 'Pérez García', '1234567890', 'Medicina General', 'doctor1@hospital.com', '3001234567');
+        INSERT INTO doctores (usuario, contrasena, nombres, apellidos, cedula, especialidad, email, telefono, celula, talentono)
+        VALUES ('doctor1', pass_hash, 'Juan','Perez','12345','General','doc@test.com','555555','300111','Talento1');
     END IF;
-END
-$$;
 
--- Admisionista de prueba
-DO $$
-BEGIN
-    IF NOT EXISTS (SELECT 1 FROM admisionistas WHERE usuario = 'admin1') THEN
-        INSERT INTO admisionistas (usuario, contraseña, Nombres, Apellidos, cedula, email, telefono)
-        VALUES ('admin1', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'María', 'López Sánchez', '0987654321', 'admin1@hospital.com', '3009876543');
-    END IF;
-END
-$$;
-
--- Paciente de prueba
-DO $$
-BEGIN
+    -- PACIENTE
     IF NOT EXISTS (SELECT 1 FROM pacientes WHERE usuario = 'paciente1') THEN
-        INSERT INTO pacientes (usuario, contraseña, Nombres, Apellidos, cedula, email, telefono, direccion)
-        VALUES ('paciente1', '8d969eef6ecad3c29a3a629280e686cf0c3f5d5a86aff3ca12020c923adc6c92', 'Pedro', 'Ramírez Torres', '1122334455', 'paciente1@email.com', '3112233445', 'Calle 123 #45-67');
+        INSERT INTO pacientes (usuario, contrasena, nombres, apellidos, cedula, email, telefono, direccion)
+        VALUES ('paciente1', pass_hash, 'Pedro','Gomez','67890','paciente@test.com','555000','Calle Falsa 123');
     END IF;
 END
 $$;
 
--- ==================== VERIFICACIÓN ====================
-
--- Verificar que las tablas se crearon correctamente
 DO $$
 BEGIN
-    IF EXISTS (SELECT 1 FROM pg_tables WHERE tablename = 'pacientes') THEN
-        RAISE NOTICE 'Base de datos inicializada correctamente';
-    END IF;
+    RAISE NOTICE 'Base de datos inicializada. Contraseña para usuarios de prueba: secret';
 END
 $$;
-
--- Mostrar conteo de registros
-SELECT 
-    'pacientes' as tabla, COUNT(*) as registros FROM pacientes
-UNION ALL
-SELECT 'doctores', COUNT(*) FROM doctores
-UNION ALL
-SELECT 'admisionistas', COUNT(*) FROM admisionistas
-UNION ALL
-SELECT 'historia_clinica', COUNT(*) FROM historia_clinica;docker-compose up --build

@@ -3,20 +3,13 @@ from sqlalchemy.ext.declarative import declarative_base
 
 Base = declarative_base()
 
-class Usuario(Base):
-    __tablename__ = 'usuarios'
-    id_usuario = Column(Integer, primary_key=True)
-    usuario = Column(String, unique=True, nullable=False)
-    contraseña = Column(String, nullable=False)
-    rol = Column(String, nullable=False)
-
 class Paciente(Base):
     __tablename__ = 'pacientes'
     id_paciente = Column(Integer, primary_key=True)
     usuario = Column(String, unique=True, nullable=False)
-    contraseña = Column(String, nullable=False)
-    Nombres = Column(String)
-    Apellidos = Column(String)
+    contrasena = Column(String, nullable=False)
+    nombres = Column(String)
+    apellidos = Column(String)
     cedula = Column(String)
     email = Column(String)
     telefono = Column(String)
@@ -25,16 +18,29 @@ class Paciente(Base):
 class Doctor(Base):
     __tablename__ = 'doctores'
     id_doctor = Column(Integer, primary_key=True)
-    Nombres = Column(String)
-    Apellidos = Column(String)
+    usuario = Column(String, unique=True, nullable=False)
+    contrasena = Column(String, nullable=False)
+    nombres = Column(String)
+    apellidos = Column(String)
     cedula = Column(String)
     especialidad = Column(String)
     celula = Column(String)
-    usuario = Column(String, unique=True)
     email = Column(String)
     telefono = Column(String)
-    id_Estado_civil = Column(Integer)
+    id_estado_civil = Column(Integer)
     talentono = Column(String)
+    direccion = Column(String)
+
+class Admisionista(Base):
+    __tablename__ = 'admisionistas'
+    id_admisionista = Column(Integer, primary_key=True)
+    usuario = Column(String, unique=True, nullable=False)
+    contrasena = Column(String, nullable=False)
+    nombres = Column(String)
+    apellidos = Column(String)
+    cedula = Column(String)
+    email = Column(String)
+    telefono = Column(String)
     direccion = Column(String)
 
 class HistoriaClinica(Base):
@@ -62,5 +68,3 @@ class Examen(Base):
     resultado = Column(Float)
     valor = Column(String)
     fecha_registro = Column(Date)
-
-# Puedes agregar los modelos para procedimientos, enfermedades, etc. siguiendo el mismo patrón.
