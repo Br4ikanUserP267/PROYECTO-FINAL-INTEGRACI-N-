@@ -1,0 +1,41 @@
+version: '3.8'
+
+services:
+  # --- SEDE 1: CARTAGENA (Azul) ---
+  front_cartagena:
+    build: .
+    container_name: front_cartagena
+    ports:
+      - "8501:8501"
+    environment:
+      - SEDE_NAME=Cartagena
+      # Conecta al puerto 8000 de tu PC (Backend Cartagena)
+      - API_URL=http://host.docker.internal:8000
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- SEDE 2: SINCELEJO (Verde) ---
+  front_sincelejo:
+    build: .
+    container_name: front_sincelejo
+    ports:
+      - "8502:8501"
+    environment:
+      - SEDE_NAME=Sincelejo
+      # Conecta al puerto 8001 de tu PC (Backend Sincelejo)
+      - API_URL=http://host.docker.internal:8001
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  # --- SEDE 3: MONTERÍA (Naranja) ---
+  front_monteria:
+    build: .
+    container_name: front_monteria
+    ports:
+      - "8503:8501"
+    environment:
+      - SEDE_NAME=Montería
+      # Conecta al puerto 8002 de tu PC (Backend Montería)
+      - API_URL=http://host.docker.internal:8002
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
